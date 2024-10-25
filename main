@@ -1,0 +1,79 @@
+import asyncio
+import json
+import os
+from pathlib import Path
+from urllib.parse import urlparse
+from tqdm import tqdm
+import pypdfium2 as pdfium
+import pandas as pd
+from crowd_sdk.core.utils.common import cast_params
+from crowd_sdk.tagme import TagmeClientAdvanced
+
+
+def construct_config(config: dict) -> dict:
+    if config['netloc'] == 'tagme.apps.prom-gen.sigma.sbrf.ru':
+        config['config_path'] = os.path.expanduser('~/configs/.sigma.cfg')
+        config['task_params'] = ['K3', '-']
+    elif config['netloc'] == 'tagme.sberdevices.ru':
+        config['config_path'] = os.path.expanduser('~/configs/.cloud.cfg')
+    return config
+
+
+def parse_url(tg_url: str) -> dict:
+    parsed_url = urlparse(tg_url)
+    config = parsed_url.path.split('/')
+    try:
+        return {
+            'netloc': parsed_url.netloc,
+            'org_id': config[2],
+            # 'project_id': config[4],
+            # 'task_id': config[6]
+        }
+    except IndexError:
+        raise ValueError('Вы ввели некорректный URL.')
+
+async def upload_file(client, dataset_id, file, org_id, progress_bar):
+    await client.upload_dataset_files(dataset_id=dataset_id, filepaths=[file], organization_id=org_id)
+    progress_bar.update(1)
+
+async def upload_data_to_dataset(client, org_id: str) -> str:
+
+    data_path = Path(__file__).parent / 'in'
+    dataset = await client.create_dataset(name='Gif_project', organization_id=org_id)
+    # await client.upload_folder_to_dataset(dataset_id=dataset.id, folder=data_path, organization_id=org_id)
+    files = list(data_path.iterdir())
+    progress_bar = tqdm(total=len(files), desc='Загружаем файлы', colour='BLUE')
+
+    tasks = [upload_file(client, dataset.id, file, org_id, progress_bar) for file in files]
+    await asyncio.gather(*tasks)
+    progress_bar.close()
+
+    return dataset.id
+
+async def get_files_info(client, dataset_id: str, org_id: str) -> list:
+    data = await client.get_dataset_files(dataset_id=dataset_id, organization_id=org_id)
+    # print(data)
+    return data
+
+def get_file_list(src_path: str | Path) -> list:
+    return [file for file in Path(src_path).iterdir() if file.is_file()]
+
+def save_to_excel(files: list, src_path: str | Path) -> None:
+    df = pd.DataFrame(files, columns=['FILENAME', 'INPUT:image'])
+    dest_path = Path(src_path, 'output')
+    if not dest_path.exists():
+        dest_path.mkdir(parents=True, exist_ok=True)
+    excel_path = dest_path / 'file_links.xlsx'
+    df.to_excel(excel_path, index=False)
+
+async def main() -> None:
+    src_path = Path(__file__).parent
+    config = construct_config(parse_url(input('Введите ссылку на раздел "Датасеты", где его необходимо создать: \n')))
+    client = TagmeClientAdvanced(config=config['config_path'])
+    dataset_id = await upload_data_to_dataset(client=client, org_id=config['org_id'])
+    files_info = await get_files_info(client=client, dataset_id=dataset_id, org_id=config['org_id'])
+    file_links = [{'FILENAME': file.name, 'INPUT:image': file.url} for file in files_info]
+    save_to_excel(file_links, src_path)
+
+if __name__ == "__main__":
+    asyncio.run(main())
